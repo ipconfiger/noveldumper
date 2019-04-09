@@ -11,11 +11,17 @@ import sys
 import os
 import pickle
 import time
+from multiprocessing import Pool
 
 htmlparser = HTMLParser.HTMLParser()
 tag_reg = re.compile(r'<[^>]*>')
 clean = lambda html_str: tag_reg.sub('',html_str).replace('\n','').replace(' ','').replace('<br>', '\n').replace('<br/>', '\n')
 
+
+def tostr(s):
+    if isinstance(s, unicode):
+        return s.encode('utf8')
+    return s
 
 
 class TitleNotMatchedError(Exception):
@@ -52,12 +58,30 @@ def load_state():
         return pickle.loads(f.read())
 
 
+def get_domain(url):
+    return "%s://%s" % (url.split('/')[0], url.split('/')[2])
+
+
+def get_content(url):
+    origin = get_domain(url)
+    session = requests.Session()
+    session.headers.update(
+        {
+            'Referer': origin,
+            'Origin': origin,
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.121 Safari/537.36',
+            'Cookie': '_ga=GA1.2.915642510.1552870399; _gid=GA1.2.980717901.1552870399; _gat=1'
+        }
+    )
+    return session.get(url).content
+
 
 class NovelUrls(object):
     def __init__(self, base_url, xpath):
         self.urls = []
-        domain = base_url.split('/')[2]
-        html_content = requests.get(base_url).content
+        domain = base_url.split('/') [2]
+
+        html_content = get_content(base_url)
         if chardet.detect(html_content).get('encoding') == 'GB2312':
              html_content = html_content.decode('GBK').encode('utf8')
         root = html.document_fromstring(html_content)
@@ -74,7 +98,7 @@ class NovelUrls(object):
 
 class NovelChapter(object):
     def __init__(self, url, content_xpath):
-        content = requests.get(url).content
+        content = get_content(url)
         if chardet.detect(content).get('encoding') == 'GB2312':
             content = content.decode('GBK').encode('utf8')
         self.html_content = content.replace('&nbsp;', ' ')
@@ -83,7 +107,11 @@ class NovelChapter(object):
             matched_content = root.xpath(content_xpath)
             if not matched_content:
                 raise ContentNotMatchedError()
-            self.txt_content = clean(htmlparser.unescape(html.tostring(matched_content[0], pretty_print=True, encoding="utf8")))
+            try:
+                self.txt_content = clean(htmlparser.unescape(html.tostring(matched_content[0], pretty_print=True, encoding="utf8").decode('utf8')))
+            except Exception as e:
+                click.echo('<ERROR:> %s' % e)
+                click.echo(type(html.tostring(matched_content[0], pretty_print=True, encoding="utf8")))
 
 
 @click.group()
@@ -210,8 +238,25 @@ def ajax_chapter(name):
         break
 
 
+def asyncGetChapter(idx, url, title, processstate, ajax_md):
+    if ajax_md:
+        content = ajax_md.fetch(url, NovelChapter(url, None).html_content)
+    else:
+        content = NovelChapter(url, processstate.content_xpath).txt_content
+    click.echo("%s processed" % title.encode('utf8'))
+    return {'idx': idx, 'title':title, 'content': content}
+    
+
 @click.command()
-def dump_flat():
+@click.option('-f', '--min', default=0)
+@click.option('-t', '--max', default=9999)
+@click.option('-p', '--process', default=5)
+def dump_flat(min, max, process):
+    execute_dump(max, min, process)
+    click.echo('Dump Complete!')
+
+
+def execute_dump (max, min, process_num, ajax_md=None):
     try:
         processstate = load_state()
     except IOError as e:
@@ -223,52 +268,39 @@ def dump_flat():
     if not processstate.chapter_detected:
         click.echo('Run flat_chapter to check chapter')
         sys.exit(1)
-
     lines = []
     lines.append(processstate.book_name.encode('utf8'))
-
-    for url_, title in processstate.chapters:
-        try:
-            content = NovelChapter(url_, processstate.content_xpath).txt_content
-            lines.append("\n%s\n\n" % title.encode('utf8'))
-            lines.append(content)
-            click.echo("%s processed" % title.encode('utf8'))
-            time.sleep(1)
-        except ContentNotMatchedError:
-            continue
-
+    _idx = 0
+    pool = Pool(processes=int(process_num))
+    results = []
+    for url_, title in processstate.chapters [min: max]:
+        results.append(pool.apply_async(asyncGetChapter, args=(_idx, url_, title, processstate, ajax_md)))
+        _idx += 1
+    pool.close()
+    pool.join()
+    async_results = []
+    for res in results:
+        async_results.append(res.get())
+    sorted_results = sorted(async_results, key=lambda item: item.get('idx'))
+    for item in sorted_results:
+        title = item.get('title')
+        content = item.get('content')
+        lines.append("\n%s\n\n" % title.encode('utf8'))
+        lines.append(tostr(content))
+    click.echo("done")
     with open(os.path.join(os.getcwd(), "%s.txt" % processstate.book_name.encode('utf8')), 'w') as f:
         f.writelines(lines)
-    click.echo('Ajax Dump Complete!')
-        
+
 
 @click.command()
 @click.argument('name')
-def dump_ajax(name):
-    try:
-        processstate = load_state()
-    except IOError as e:
-        click.echo('Run init first')
-        sys.exit(1)
-    if not processstate.chaper_link_detected:
-        click.echo('Run analysis-url to check chapter\'s url')
-        sys.exit(1)
-    if not processstate.chapter_detected:
-        click.echo('Run flat_chapter to check chapter')
-        sys.exit(1)
+@click.option('-f', '--min', default=0)
+@click.option('-t', '--max', default=9999)
+@click.option('-p', '--process', default=5)
+def dump_ajax(name, min, max, process):
     sys.path.append(os.getcwd())
     md = importlib.import_module(name)
-    lines = []
-    lines.append(processstate.book_name.encode('utf8'))
-
-    for url_, title in processstate.chapters:
-        content = md.fetch(url_, NovelChapter(url_, None).html_content)
-        lines.append("\n%s\n\n" % title.encode('utf8'))
-        lines.append(content)
-        click.echo("%s processed" % title.encode('utf8'))
-
-    with open(os.path.join(os.getcwd(), "%s.txt" % processstate.book_name.encode('utf8')), 'w') as f:
-        f.writelines(lines)
+    execute_dump(max, min, process, ajax_md=md)
     click.echo('Ajax Dump Complete!')
 
 
@@ -279,6 +311,7 @@ def main():
     cli.add_command(ajax_chapter)
     cli.add_command(dump_flat)
     cli.add_command(dump_ajax)
+    cli.add_command(reverse)
     cli()
 
 
