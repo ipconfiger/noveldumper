@@ -10,7 +10,7 @@ import importlib
 import sys
 import os
 import pickle
-import time
+import click
 from multiprocessing import Pool
 
 htmlparser = HTMLParser.HTMLParser()
@@ -81,16 +81,28 @@ class NovelUrls(object):
         self.urls = []
         domain = base_url.split('/') [2]
 
+        current_base = "/".join(base_url.split('/')[:-1])
+
         html_content = get_content(base_url)
         if chardet.detect(html_content).get('encoding') == 'GB2312':
              html_content = html_content.decode('GBK').encode('utf8')
         root = html.document_fromstring(html_content)
+        #click.echo("html:%s" % html_content)
         for element in root.xpath(xpath):
             path = element.attrib ['href']
+            #click.echo("element:%s" % element)
             if path.startswith('/'):
                 self.urls.append(("http://%s%s" % (domain, path), final_text(element)))
+                continue
             if path.startswith('http'):
-                self.urls.append(path)
+                self.urls.append((path, final_text(element)))
+                continue
+            if  (not path.startswith('/')) and (not path.startswith('http')):
+                if base_url.endswith('/'):
+                    self.urls.append(("%s%s" % (base_url, path), final_text(element)))
+                else:
+                    self.urls.append(("%s/%s" % (current_base, path), final_text(element)))
+
 
     def __iter__(self):
         for url, title in self.urls:
@@ -282,11 +294,13 @@ def execute_dump (max, min, process_num, ajax_md=None):
     for res in results:
         async_results.append(res.get())
     sorted_results = sorted(async_results, key=lambda item: item.get('idx'))
+    _idx = 1
     for item in sorted_results:
         title = item.get('title')
         content = item.get('content')
-        lines.append("\n%s\n\n" % title.encode('utf8'))
+        lines.append("\nChapter-%s %s\n\n" % (_idx, title.encode('utf8')))
         lines.append(tostr(content))
+        _idx+=1
     click.echo("done")
     with open(os.path.join(os.getcwd(), "%s.txt" % processstate.book_name.encode('utf8')), 'w') as f:
         f.writelines(lines)

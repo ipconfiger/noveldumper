@@ -4,7 +4,7 @@ __author__ = 'liming'
 from setuptools import setup
 
 setup(name='noveldumper',
-      version='0.0.3',
+      version='0.0.4',
       description='Dump novel from site to txt file',
       url='https://github.com/ipconfiger/noveldumper',
       author='Alexander.Li',
