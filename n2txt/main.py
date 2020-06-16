@@ -1,5 +1,6 @@
 # coding=utf8
 
+import urllib3
 import requests
 import chardet
 from lxml import html
@@ -13,6 +14,7 @@ import pickle
 import click
 from multiprocessing import Pool
 
+urllib3.disable_warnings()
 htmlparser = HTMLParser.HTMLParser()
 tag_reg = re.compile(r'<[^>]*>')
 clean = lambda html_str: tag_reg.sub('',html_str).replace('\n','').replace(' ','').replace('<br>', '\n').replace('<br/>', '\n')
@@ -31,10 +33,15 @@ class ContentNotMatchedError(Exception):
     pass
 
 def final_text(ele):
-    if ele.text:
+    nodes = ele.getchildren()
+    print(nodes)
+    if len(nodes) < 1:
         return ele.text
     else:
-        return final_text(ele.getchildren()[0])
+        text_nodes = []
+        for node in ele.getchildren():
+            text_nodes.append(final_text(node))
+        return "\n\n".join(text_nodes)
 
 
 class ProcessState(object):
@@ -73,7 +80,12 @@ def get_content(url):
             'Cookie': '_ga=GA1.2.915642510.1552870399; _gid=GA1.2.980717901.1552870399; _gat=1'
         }
     )
-    return session.get(url).content
+    resp = session.get(url, verify=False)
+    text_result = resp.text
+    bytes_results = resp.content
+    if chardet.detect(bytes_results).get('encoding') == 'GB2312':
+        return bytes_results.decode('gbk')
+    return bytes_results.decode('utf8')
 
 
 class NovelUrls(object):
@@ -84,8 +96,6 @@ class NovelUrls(object):
         current_base = "/".join(base_url.split('/')[:-1])
 
         html_content = get_content(base_url)
-        if chardet.detect(html_content).get('encoding') == 'GB2312':
-             html_content = html_content.decode('GBK').encode('utf8')
         root = html.document_fromstring(html_content)
         #click.echo("html:%s" % html_content)
         for element in root.xpath(xpath):
@@ -97,7 +107,7 @@ class NovelUrls(object):
             if path.startswith('http'):
                 self.urls.append((path, final_text(element)))
                 continue
-            if  (not path.startswith('/')) and (not path.startswith('http')):
+            if (not path.startswith('/')) and (not path.startswith('http')):
                 if base_url.endswith('/'):
                     self.urls.append(("%s%s" % (base_url, path), final_text(element)))
                 else:
@@ -111,8 +121,6 @@ class NovelUrls(object):
 class NovelChapter(object):
     def __init__(self, url, content_xpath):
         content = get_content(url)
-        if chardet.detect(content).get('encoding') == 'GB2312':
-            content = content.decode('GBK').encode('utf8')
         self.html_content = content.replace('&nbsp;', ' ')
         root = html.document_fromstring(content, parser=html.HTMLParser(encoding='utf-8'))
         if content_xpath:
@@ -152,11 +160,9 @@ def init(url, name):
 
 @click.command()
 @click.argument('xpath')
-def analysis_url(xpath):
+def menu(xpath):
     """
     Show chapter URLs detected in Chapter list page
-    :param url:  Chapter list page
-    :type url: str
     :param xpath: xpath of href tag
     :type xpath: str
     :return:
@@ -292,7 +298,10 @@ def execute_dump (max, min, process_num, ajax_md=None):
     pool.join()
     async_results = []
     for res in results:
-        async_results.append(res.get())
+        try:
+            async_results.append(res.get())
+        except Exception as e:
+            print e
     sorted_results = sorted(async_results, key=lambda item: item.get('idx'))
     _idx = 1
     for item in sorted_results:
@@ -320,7 +329,7 @@ def dump_ajax(name, min, max, process):
 
 def main():
     cli.add_command(init)
-    cli.add_command(analysis_url)
+    cli.add_command(menu)
     cli.add_command(flat_chapter)
     cli.add_command(ajax_chapter)
     cli.add_command(dump_flat)
